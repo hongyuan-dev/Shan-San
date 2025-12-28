@@ -9,14 +9,6 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Hosting;
 
-var builder = WebApplication.CreateBuilder(args);
-var app = builder.Build();
-
-app.MapGet("/", () => "OK");
-app.MapGet("/health", () => "Bot alive");
-
-_ = app.RunAsync("http://0.0.0.0:10000");
-
 class Program
 {
     private DiscordSocketClient _client = null!;
@@ -324,4 +316,5 @@ class Program
     private void SaveChannels() =>
         File.WriteAllText(ChannelFile, JsonSerializer.Serialize(_announceChannels));
 }
+
 
