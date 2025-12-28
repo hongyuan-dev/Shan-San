@@ -105,14 +105,14 @@ class Program
 	{
 	    if (msg.Author is not SocketGuildUser user)
 	    {
-	        await msg.Channel.SendMessageAsync("❌ Impossibile verificare i permessi.");
+	        await msg.Channel.SendMessageAsync("❌ Can't control role perms.");
 	        return;
 	    }
 	
 	    // Controllo permessi: solo amministratori o chi può gestire i ruoli
 	    if (!user.GuildPermissions.Administrator && !user.GuildPermissions.ManageRoles)
 	    {
-	        await msg.Channel.SendMessageAsync("❌ Solo gli amministratori o chi può gestire i ruoli può aggiungere point givers.");
+	        await msg.Channel.SendMessageAsync("❌ Only admins or higher up can set new point giver roles.");
 	        return;
 	    }
 	
@@ -120,7 +120,7 @@ class Program
 	        _pointGiverRoles.Add(r.Id);
 	
 	    SavePointGivers();
-	    await msg.Channel.SendMessageAsync("✅ Point giver roles aggiornati.");
+	    await msg.Channel.SendMessageAsync("✅ Point giver roles updated.");
 	}
 
     private async Task SetChannel(SocketUserMessage msg, SocketGuild guild)
@@ -327,6 +327,7 @@ class Program
     private void SaveChannels() =>
         File.WriteAllText(ChannelFile, JsonSerializer.Serialize(_announceChannels));
 }
+
 
 
 
