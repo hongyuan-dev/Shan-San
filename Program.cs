@@ -1,29 +1,30 @@
-﻿using Discord;
+using Discord;
 using Discord.WebSocket;
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
+using Discord.Interactions;
 using System.Text.Json;
-using System.Threading.Tasks;
 
 class Program
 {
     private DiscordSocketClient _client = null!;
-	private static string Token =>
-    Environment.GetEnvironmentVariable("DISCORD_TOKEN")
-    ?? throw new Exception("DISCORD_TOKEN not set");
+    private InteractionService _interactions = null!;
+
+    private static string Token =>
+        Environment.GetEnvironmentVariable("DISCORD_TOKEN")
+        ?? throw new Exception("DISCORD_TOKEN not set");
+
     private const string PointsFile = "points.json";
     private const string PointGiversFile = "pointgivers.json";
     private const string UpgradesFile = "upgrades.json";
-    private const string ChannelFile = "channels.json";
+    private const string AnnounceFile = "announcechannels.json";
+    private const string CommandFile = "commandchannels.json";
 
-    private Dictionary<ulong, int> _points = new();
-    private HashSet<ulong> _pointGiverRoles = new();
-    private List<UpgradePath> _upgradePaths = new();
-    private Dictionary<ulong, ulong> _announceChannels = new();
+    public Dictionary<ulong, int> _points = new();
+    public HashSet<ulong> _pointGiverRoles = new();
+    public List<UpgradePath> _upgradePaths = new();
+    public Dictionary<ulong, ulong> _announceChannels = new();
+    public Dictionary<ulong, ulong> _commandChannels = new();
 
-    class UpgradePath
+    public class UpgradePath
     {
         public ulong OldRoleId { get; set; }
         public ulong NewRoleId { get; set; }
@@ -43,9 +44,11 @@ class Program
                 GatewayIntents.MessageContent
         });
 
-        _client.Log += m => { Console.WriteLine(m); return Task.CompletedTask; };
+        _interactions = new InteractionService(_client.Rest);
+
         _client.Ready += OnReadyAsync;
         _client.MessageReceived += OnMessageAsync;
+        _client.InteractionCreated += HandleInteraction;
 
         LoadData();
 
@@ -54,16 +57,30 @@ class Program
         await Task.Delay(-1);
     }
 
-    // ================= READY =================
-
     private async Task OnReadyAsync()
     {
-        Console.WriteLine($"Connected as {_client.CurrentUser}");
-        foreach (var g in _client.Guilds)
-            await g.DownloadUsersAsync();
+        await _interactions.AddModuleAsync<SlashCommands>(null);
+        await _interactions.RegisterCommandsGloballyAsync();
+        Console.WriteLine("Bot ready.");
     }
 
-    // ================= MESSAGE HANDLER =================
+    // ================= PERMISSIONS =================
+    public bool IsAdmin(SocketGuildUser u) =>
+        u.GuildPermissions.Administrator;
+
+    public bool IsPointGiver(SocketGuildUser? u) =>
+        u != null && u.Roles.Any(r => _pointGiverRoles.Contains(r.Id));
+
+    public bool IsAdminOrPointGiver(SocketGuildUser u) =>
+        IsAdmin(u) || IsPointGiver(u);
+
+    public bool CanUseCommands(SocketGuildUser user, SocketGuildChannel channel)
+    {
+        if (IsAdminOrPointGiver(user)) return true;
+        return _commandChannels.TryGetValue(user.Guild.Id, out var cmd) && channel.Id == cmd;
+    }
+
+    // ================= MESSAGE COMMAND HANDLER =================
 
     private async Task OnMessageAsync(SocketMessage raw)
     {
@@ -71,140 +88,152 @@ class Program
         if (raw is not SocketUserMessage msg) return;
         if (msg.Channel is not SocketGuildChannel ch) return;
 
-        var guild = ch.Guild;
-        var content = msg.Content.Trim();
+        var user = msg.Author as SocketGuildUser;
+        if (user == null) return;
 
-        if (content.StartsWith("!help")) await Help(msg);
-        else if (content.StartsWith("!addpointgiver")) await AddPointGiver(msg);
-        else if (content.StartsWith("!setchannel")) await SetChannel(msg, guild);
-        else if (content.StartsWith("!givepoints")) await GivePoints(msg, guild);
-        else if (content.StartsWith("!restorepoints")) await RestorePoints(msg, guild);
-        else if (content.StartsWith("!points")) await ShowPoints(msg);
-        else if (content.StartsWith("!showpoints")) await ShowLeaderboard(msg, guild);
-        else if (content.StartsWith("!upgrade")) await SetupUpgrade(msg, guild);
-        else if (content.StartsWith("!removeupgrade")) await RemoveUpgrade(msg);
-    }
-
-    // ================= COMMANDS =================
-
-    private async Task Help(SocketUserMessage msg)
-    {
-        await msg.Channel.SendMessageAsync(
-@"**Commands**
-`!addpointgiver @Role`
-`!setchannel`
-`!givepoints @User [amount]`
-`!restorepoints @User`
-`!points @User`
-`!showpoints [@Role]`
-`!upgrade @OldRole @NewRole points`
-`!removeupgrade @OldRole @NewRole`");
-    }
-
-    private async Task AddPointGiver(SocketUserMessage msg)
-	{
-	    if (msg.Author is not SocketGuildUser user)
-	    {
-	        await msg.Channel.SendMessageAsync("❌ Can't control role perms.");
-	        return;
-	    }
-	
-	    // Controllo permessi: solo amministratori o chi può gestire i ruoli
-	    if (!user.GuildPermissions.Administrator && !user.GuildPermissions.ManageRoles)
-	    {
-	        await msg.Channel.SendMessageAsync("❌ Only admins or higher up can set new point giver roles.");
-	        return;
-	    }
-	
-	    foreach (var r in msg.MentionedRoles)
-	        _pointGiverRoles.Add(r.Id);
-	
-	    SavePointGivers();
-	    await msg.Channel.SendMessageAsync("✅ Point giver roles updated.");
-	}
-
-    private async Task SetChannel(SocketUserMessage msg, SocketGuild guild)
-    {
-        if (!IsPointGiver(msg.Author as SocketGuildUser))
+        // Wrong-channel auto-delete
+        if (msg.Content.StartsWith("!") && !CanUseCommands(user, ch))
         {
-            await msg.Channel.SendMessageAsync("❌ Only point givers can set the channel.");
+            await msg.DeleteAsync();
+            if (_commandChannels.TryGetValue(user.Guild.Id, out var cmd))
+                await user.SendMessageAsync($"❌ Commands can only be used in <#{cmd}>");
             return;
         }
 
-        _announceChannels[guild.Id] = msg.Channel.Id;
-        SaveChannels();
+        var content = msg.Content.Trim();
 
-        await msg.Channel.SendMessageAsync("📢 Level-up announcements will be sent here.");
+        if (content.StartsWith("!points"))
+            await msg.Channel.SendMessageAsync($"{user.Username} has {_points.GetValueOrDefault(user.Id)} points.");
+
+        else if (content.StartsWith("!givepoints"))
+            await GivePoints(msg, user.Guild);
+
+        else if (content.StartsWith("!restorepoints"))
+            await RestorePoints(msg, user.Guild);
+
+        else if (content.StartsWith("!showpoints"))
+            await ShowLeaderboard(msg, user.Guild);
+
+        else if (content.StartsWith("!upgrade"))
+            await SetupUpgrade(msg);
+
+        else if (content.StartsWith("!removeupgrade"))
+            await RemoveUpgrade(msg);
+
+        else if (content.StartsWith("!addpointgiver"))
+            await AddPointGiver(msg);
+
+        else if (content.StartsWith("!setcommandchannel"))
+            await SetCommandChannel(msg);
+
+        else if (content.StartsWith("!setannouncechannel"))
+            await SetAnnounceChannel(msg);
     }
+
+    // ================= INTERACTIONS =================
+
+    private async Task HandleInteraction(SocketInteraction interaction)
+    {
+        var ctx = new SocketInteractionContext(_client, interaction);
+
+        if (interaction is SocketSlashCommand slash &&
+            !CanUseCommands((SocketGuildUser)slash.User,
+                            (SocketGuildChannel)slash.Channel))
+        {
+            await slash.RespondAsync("❌ Wrong channel.", ephemeral: true);
+            return;
+        }
+
+        await _interactions.ExecuteCommandAsync(ctx, null);
+    }
+
+    // ================= CORE LOGIC =================
+
+    public async Task RecalculateRolesAsync(SocketGuildUser user)
+    {
+        int pts = _points.GetValueOrDefault(user.Id);
+
+        foreach (var up in _upgradePaths)
+        {
+            var oldRole = user.Guild.GetRole(up.OldRoleId);
+            var newRole = user.Guild.GetRole(up.NewRoleId);
+            if (oldRole != null) await user.RemoveRoleAsync(oldRole);
+            if (newRole != null) await user.RemoveRoleAsync(newRole);
+        }
+
+        var eligible = _upgradePaths
+            .Where(u => pts >= u.RequiredPoints)
+            .OrderByDescending(u => u.RequiredPoints)
+            .FirstOrDefault();
+
+        if (eligible != null)
+        {
+            var newRole = user.Guild.GetRole(eligible.NewRoleId);
+            if (newRole != null)
+            {
+                await user.AddRoleAsync(newRole);
+                await SendLevelMessage(user, newRole.Name);
+            }
+        }
+        else
+        {
+            foreach (var up in _upgradePaths)
+            {
+                var oldRole = user.Guild.GetRole(up.OldRoleId);
+                if (oldRole != null) await user.AddRoleAsync(oldRole);
+            }
+        }
+    }
+
+    private async Task SendLevelMessage(SocketGuildUser user, string role)
+    {
+        if (_announceChannels.TryGetValue(user.Guild.Id, out var chId))
+        {
+            var ch = user.Guild.GetTextChannel(chId);
+            if (ch != null)
+                await ch.SendMessageAsync($"🎉 <@{user.Id}> is now **{role}**!");
+        }
+    }
+
+    // ================= COMMAND IMPLEMENTATIONS =================
 
     private async Task GivePoints(SocketUserMessage msg, SocketGuild guild)
     {
-        if (!IsPointGiver(msg.Author as SocketGuildUser))
-        {
-            await msg.Channel.SendMessageAsync("❌ You cannot give points.");
-            return;
-        }
+        var user = msg.Author as SocketGuildUser;
+        if (!IsAdminOrPointGiver(user)) return;
 
-        int amount = 1;
-        var parts = msg.Content.Split(' ');
-        if (int.TryParse(parts.Last(), out int v)) amount = v;
+        int amount = int.TryParse(msg.Content.Split(' ').Last(), out int v) ? v : 1;
 
         foreach (var u in msg.MentionedUsers)
         {
             _points[u.Id] = _points.GetValueOrDefault(u.Id) + amount;
             SavePoints();
-
-            var member = guild.GetUser(u.Id);
-            if (member != null)
-                await RecalculateRolesAsync(member);
+            var m = guild.GetUser(u.Id);
+            if (m != null) await RecalculateRolesAsync(m);
         }
-
-        await msg.Channel.SendMessageAsync("✅ Points updated.");
     }
 
     private async Task RestorePoints(SocketUserMessage msg, SocketGuild guild)
     {
-        if (!IsPointGiver(msg.Author as SocketGuildUser))
-        {
-            await msg.Channel.SendMessageAsync("❌ You cannot restore points.");
-            return;
-        }
+        var user = msg.Author as SocketGuildUser;
+        if (!IsAdminOrPointGiver(user)) return;
 
         foreach (var u in msg.MentionedUsers)
         {
             _points[u.Id] = 0;
             SavePoints();
-
-            var member = guild.GetUser(u.Id);
-            if (member != null)
-                await RecalculateRolesAsync(member);
-        }
-
-        await msg.Channel.SendMessageAsync("♻ Points reset to zero.");
-    }
-
-    private async Task ShowPoints(SocketUserMessage msg)
-    {
-        foreach (var u in msg.MentionedUsers)
-        {
-            int pts = _points.GetValueOrDefault(u.Id);
-            await msg.Channel.SendMessageAsync($"**{u.Username}** has {pts} points.");
+            var m = guild.GetUser(u.Id);
+            if (m != null) await RecalculateRolesAsync(m);
         }
     }
 
     private async Task ShowLeaderboard(SocketUserMessage msg, SocketGuild guild)
     {
-        if (!IsPointGiver(msg.Author as SocketGuildUser))
-        {
-            await msg.Channel.SendMessageAsync("❌ Only point givers can use this.");
-            return;
-        }
-
-        var role = msg.MentionedRoles.FirstOrDefault();
+        var user = msg.Author as SocketGuildUser;
+        if (!IsAdminOrPointGiver(user)) return;
 
         var users = guild.Users
-            .Where(u => role == null || u.Roles.Any(r => r.Id == role.Id))
-            .Select(u => new { u.Username, u.Id, P = _points.GetValueOrDefault(u.Id) })
+            .Select(u => new { u.Username, P = _points.GetValueOrDefault(u.Id) })
             .OrderByDescending(x => x.P)
             .Take(10);
 
@@ -214,29 +243,23 @@ class Program
                 $"{i + 1}. **{u.Username}** — {u.P}")));
     }
 
-    // ================= UPGRADES =================
-
-    private async Task SetupUpgrade(SocketUserMessage msg, SocketGuild guild)
+    private async Task SetupUpgrade(SocketUserMessage msg)
     {
-        var parts = msg.Content.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        var roleIds = parts.Where(p => p.StartsWith("<@&"))
-            .Select(p => ulong.Parse(p.Trim('<', '@', '&', '>')))
-            .ToList();
+        var user = msg.Author as SocketGuildUser;
+        if (!IsAdminOrPointGiver(user)) return;
 
-        if (roleIds.Count < 2 || !int.TryParse(parts.Last(), out int pts))
-        {
-            await msg.Channel.SendMessageAsync("Usage: !upgrade @OldRole @NewRole points");
-            return;
-        }
+        var roles = msg.MentionedRoles.ToList();
+        var parts = msg.Content.Split(' ');
+        if (roles.Count < 2 || !int.TryParse(parts.Last(), out int pts)) return;
 
         _upgradePaths.RemoveAll(u =>
-            u.OldRoleId == roleIds[0] &&
-            u.NewRoleId == roleIds[1]);
+            u.OldRoleId == roles[0].Id &&
+            u.NewRoleId == roles[1].Id);
 
         _upgradePaths.Add(new UpgradePath
         {
-            OldRoleId = roleIds[0],
-            NewRoleId = roleIds[1],
+            OldRoleId = roles[0].Id,
+            NewRoleId = roles[1].Id,
             RequiredPoints = pts
         });
 
@@ -246,6 +269,9 @@ class Program
 
     private async Task RemoveUpgrade(SocketUserMessage msg)
     {
+        var user = msg.Author as SocketGuildUser;
+        if (!IsAdminOrPointGiver(user)) return;
+
         var roles = msg.MentionedRoles.ToList();
         if (roles.Count < 2) return;
 
@@ -257,52 +283,37 @@ class Program
         await msg.Channel.SendMessageAsync("✅ Upgrade removed.");
     }
 
-    // ================= CORE LOGIC =================
-
-    private async Task RecalculateRolesAsync(SocketGuildUser user)
+    private async Task AddPointGiver(SocketUserMessage msg)
     {
-        int pts = _points.GetValueOrDefault(user.Id);
+        var user = msg.Author as SocketGuildUser;
+        if (!IsAdmin(user)) return;
 
-        var allUpgradeRoles = _upgradePaths
-            .SelectMany(u => new[] { u.OldRoleId, u.NewRoleId })
-            .Distinct()
-            .Select(id => user.Guild.GetRole(id))
-            .Where(r => r != null)
-            .ToList();
+        foreach (var r in msg.MentionedRoles)
+            _pointGiverRoles.Add(r.Id);
 
-        var eligible = _upgradePaths
-            .Where(u => pts >= u.RequiredPoints)
-            .OrderByDescending(u => u.RequiredPoints)
-            .FirstOrDefault();
-
-        foreach (var r in allUpgradeRoles)
-            if (user.Roles.Any(ur => ur.Id == r.Id))
-                await user.RemoveRoleAsync(r);
-
-        if (eligible != null)
-        {
-            var newRole = user.Guild.GetRole(eligible.NewRoleId);
-            if (newRole != null)
-            {
-                await user.AddRoleAsync(newRole);
-                await SendLevelMessage(user, newRole.Name);
-            }
-        }
+        SavePointGivers();
+        await msg.Channel.SendMessageAsync("✅ Point giver role added.");
     }
 
-    private async Task SendLevelMessage(SocketGuildUser user, string roleName)
+    private async Task SetCommandChannel(SocketUserMessage msg)
     {
-        if (!_announceChannels.TryGetValue(user.Guild.Id, out ulong channelId))
-            return;
+        var user = msg.Author as SocketGuildUser;
+        if (!IsAdmin(user)) return;
 
-        var channel = user.Guild.GetTextChannel(channelId);
-        if (channel != null)
-            await channel.SendMessageAsync(
-                $"🎉 <@{user.Id}> is now **{roleName}**!");
+        _commandChannels[user.Guild.Id] = msg.Channel.Id;
+        SaveCommands();
+        await msg.Channel.SendMessageAsync("🛠 Command channel set.");
     }
 
-    private bool IsPointGiver(SocketGuildUser? u) =>
-        u != null && u.Roles.Any(r => _pointGiverRoles.Contains(r.Id));
+    private async Task SetAnnounceChannel(SocketUserMessage msg)
+    {
+        var user = msg.Author as SocketGuildUser;
+        if (!IsAdmin(user)) return;
+
+        _announceChannels[user.Guild.Id] = msg.Channel.Id;
+        SaveAnnounce();
+        await msg.Channel.SendMessageAsync("📢 Announcement channel set.");
+    }
 
     // ================= STORAGE =================
 
@@ -314,20 +325,182 @@ class Program
             _pointGiverRoles = JsonSerializer.Deserialize<HashSet<ulong>>(File.ReadAllText(PointGiversFile)) ?? new();
         if (File.Exists(UpgradesFile))
             _upgradePaths = JsonSerializer.Deserialize<List<UpgradePath>>(File.ReadAllText(UpgradesFile)) ?? new();
-        if (File.Exists(ChannelFile))
-            _announceChannels = JsonSerializer.Deserialize<Dictionary<ulong, ulong>>(File.ReadAllText(ChannelFile)) ?? new();
+        if (File.Exists(AnnounceFile))
+            _announceChannels = JsonSerializer.Deserialize<Dictionary<ulong, ulong>>(File.ReadAllText(AnnounceFile)) ?? new();
+        if (File.Exists(CommandFile))
+            _commandChannels = JsonSerializer.Deserialize<Dictionary<ulong, ulong>>(File.ReadAllText(CommandFile)) ?? new();
     }
 
-    private void SavePoints() =>
-        File.WriteAllText(PointsFile, JsonSerializer.Serialize(_points));
-    private void SavePointGivers() =>
-        File.WriteAllText(PointGiversFile, JsonSerializer.Serialize(_pointGiverRoles));
-    private void SaveUpgrades() =>
-        File.WriteAllText(UpgradesFile, JsonSerializer.Serialize(_upgradePaths));
-    private void SaveChannels() =>
-        File.WriteAllText(ChannelFile, JsonSerializer.Serialize(_announceChannels));
+    public void SavePoints() => File.WriteAllText(PointsFile, JsonSerializer.Serialize(_points));
+    public void SaveUpgrades() => File.WriteAllText(UpgradesFile, JsonSerializer.Serialize(_upgradePaths));
+    public void SavePointGivers() => File.WriteAllText(PointGiversFile, JsonSerializer.Serialize(_pointGiverRoles));
+    public void SaveAnnounce() => File.WriteAllText(AnnounceFile, JsonSerializer.Serialize(_announceChannels));
+    public void SaveCommands() => File.WriteAllText(CommandFile, JsonSerializer.Serialize(_commandChannels));
 }
 
+// ================= SLASH COMMANDS =================
+
+public class SlashCommands : InteractionModuleBase<SocketInteractionContext>
+{
+    private Program Bot => (Program)Context.Client;
+
+    [SlashCommand("points", "Show points")]
+    public async Task Points(SocketGuildUser? user = null)
+    {
+        user ??= (SocketGuildUser)Context.User;
+        await RespondAsync($"{user.Username} has {Bot._points.GetValueOrDefault(user.Id)} points.", ephemeral: true);
+    }
+
+    [SlashCommand("givepoints", "Give points")]
+    public async Task GivePoints(SocketGuildUser user, int amount = 1)
+    {
+        if (!Bot.IsAdminOrPointGiver((SocketGuildUser)Context.User))
+        {
+            await RespondAsync("❌ No permission.", ephemeral: true);
+            return;
+        }
+
+        Bot._points[user.Id] = Bot._points.GetValueOrDefault(user.Id) + amount;
+        Bot.SavePoints();
+        await Bot.RecalculateRolesAsync(user);
+        await RespondAsync("✅ Points given.", ephemeral: true);
+    }
+
+    [SlashCommand("restorepoints", "Reset points")]
+    public async Task Restore(SocketGuildUser user)
+    {
+        if (!Bot.IsAdminOrPointGiver((SocketGuildUser)Context.User))
+        {
+            await RespondAsync("❌ No permission.", ephemeral: true);
+            return;
+        }
+
+        Bot._points[user.Id] = 0;
+        Bot.SavePoints();
+        await Bot.RecalculateRolesAsync(user);
+        await RespondAsync("♻ Points reset.", ephemeral: true);
+    }
+
+    [SlashCommand("upgrade", "Create upgrade path")]
+    public async Task Upgrade(SocketRole oldRole, SocketRole newRole, int points)
+    {
+        if (!Bot.IsAdminOrPointGiver((SocketGuildUser)Context.User))
+        {
+            await RespondAsync("❌ No permission.", ephemeral: true);
+            return;
+        }
+
+        Bot._upgradePaths.RemoveAll(u => u.OldRoleId == oldRole.Id && u.NewRoleId == newRole.Id);
+        Bot._upgradePaths.Add(new Program.UpgradePath { OldRoleId = oldRole.Id, NewRoleId = newRole.Id, RequiredPoints = points });
+        Bot.SaveUpgrades();
+        await RespondAsync("✅ Upgrade path set.", ephemeral: true);
+    }
+
+    [SlashCommand("removeupgrade", "Remove upgrade path")]
+    public async Task RemoveUpgrade(SocketRole oldRole, SocketRole newRole)
+    {
+        if (!Bot.IsAdminOrPointGiver((SocketGuildUser)Context.User))
+        {
+            await RespondAsync("❌ No permission.", ephemeral: true);
+            return;
+        }
+
+        Bot._upgradePaths.RemoveAll(u => u.OldRoleId == oldRole.Id && u.NewRoleId == newRole.Id);
+        Bot.SaveUpgrades();
+        await RespondAsync("✅ Upgrade removed.", ephemeral: true);
+    }
+
+    [SlashCommand("setcommandchannel", "Set command channel")]
+    public async Task SetCommand()
+    {
+        var u = (SocketGuildUser)Context.User;
+        if (!Bot.IsAdmin(u))
+        {
+            await RespondAsync("❌ Admins only.", ephemeral: true);
+            return;
+        }
+
+        Bot._commandChannels[u.Guild.Id] = Context.Channel.Id;
+        Bot.SaveCommands();
+        await RespondAsync("🛠 Command channel set.", ephemeral: true);
+    }
+
+    [SlashCommand("setannouncechannel", "Set announce channel")]
+    public async Task SetAnnounce()
+    {
+        var u = (SocketGuildUser)Context.User;
+        if (!Bot.IsAdmin(u))
+        {
+            await RespondAsync("❌ Admins only.", ephemeral: true);
+            return;
+        }
+
+        Bot._announceChannels[u.Guild.Id] = Context.Channel.Id;
+        Bot.SaveAnnounce();
+        await RespondAsync("📢 Announcement channel set.", ephemeral: true);
+    }
+
+    [SlashCommand("addpointgiver", "Add point giver role")]
+    public async Task AddPointGiver(SocketRole role)
+    {
+        var u = (SocketGuildUser)Context.User;
+        if (!Bot.IsAdmin(u))
+        {
+            await RespondAsync("❌ Admins only.", ephemeral: true);
+            return;
+        }
+
+        Bot._pointGiverRoles.Add(role.Id);
+        Bot.SavePointGivers();
+        await RespondAsync("✅ Point giver role added.", ephemeral: true);
+    }
+
+    [SlashCommand("showpoints", "Show leaderboard")]
+    public async Task Leaderboard(SocketRole? role = null)
+    {
+        var u = (SocketGuildUser)Context.User;
+        if (!Bot.IsAdminOrPointGiver(u))
+        {
+            await RespondAsync("❌ No permission.", ephemeral: true);
+            return;
+        }
+
+        var users = Context.Guild.Users
+            .Where(x => role == null || x.Roles.Any(r => r.Id == role.Id))
+            .Select(u => new { u.Username, P = Bot._points.GetValueOrDefault(u.Id) })
+            .OrderByDescending(x => x.P)
+            .Take(10);
+
+        await RespondAsync("**Leaderboard**\n" + string.Join("\n", users.Select((u, i) => $"{i + 1}. **{u.Username}** — {u.P}")), ephemeral: true);
+    }
+
+    [SlashCommand("help", "Show available commands")]
+    public async Task Help()
+    {
+        var u = (SocketGuildUser)Context.User;
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("**Discord Points Bot Commands**");
+        sb.AppendLine("`/points [user]` - Show your or another user's points.");
+
+        if (Bot.IsAdminOrPointGiver(u))
+        {
+            sb.AppendLine("`/givepoints <user> [amount]` - Give points.");
+            sb.AppendLine("`/restorepoints <user>` - Reset points.");
+            sb.AppendLine("`/upgrade <oldRole> <newRole> <points>` - Create upgrade path.");
+            sb.AppendLine("`/removeupgrade <oldRole> <newRole>` - Remove upgrade path.");
+            sb.AppendLine("`/showpoints [role]` - Leaderboard.");
+        }
+
+        if (Bot.IsAdmin(u))
+        {
+            sb.AppendLine("`/addpointgiver <role>` - Add a point giver role.");
+            sb.AppendLine("`/setcommandchannel` - Set command channel.");
+            sb.AppendLine("`/setannouncechannel` - Set announcement channel.");
+        }
+
+        await RespondAsync(sb.ToString(), ephemeral: true);
+    }
+}
 
 
 
