@@ -337,8 +337,29 @@ public class SlashCommands : InteractionModuleBase<SocketInteractionContext>
     {
         _bot = bot;
     }
-
-    [SlashCommand("points", "Show points")]
+    
+    [SlashCommand("removepointgiver", "Remove point giver role")]
+    public async Task RemovePointGiver(SocketRole role)
+    {
+        var u = (SocketGuildUser)Context.User;
+        if (!_bot.IsAdmin(u))
+        {
+            await RespondAsync("❌ Admins only.", ephemeral: true);
+            return;
+        }
+    
+        if (_bot._pointGiverRoles.Remove(role.Id))
+        {
+            _bot.SavePointGivers();
+            await RespondAsync("✅ Point giver role removed.", ephemeral: true);
+        }
+        else
+        {
+            await RespondAsync("⚠ That role is not a point giver.", ephemeral: true);
+        }
+    }
+    
+        [SlashCommand("points", "Show points")]
     public async Task Points(SocketGuildUser? user = null)
     {
         user ??= (SocketGuildUser)Context.User;
@@ -487,6 +508,7 @@ public class SlashCommands : InteractionModuleBase<SocketInteractionContext>
 
         if (_bot.IsAdmin(u))
         {
+            sb.AppendLine("`/removepointgiver <role>` - Removes a role from being a point giver.");
             sb.AppendLine("`/addpointgiver <role>` - Add a point giver role.");
             sb.AppendLine("`/setcommandchannel` - Set command channel.");
             sb.AppendLine("`/setannouncechannel` - Set announcement channel.");
@@ -495,6 +517,7 @@ public class SlashCommands : InteractionModuleBase<SocketInteractionContext>
         await RespondAsync(sb.ToString(), ephemeral: true);
     }
 }
+
 
 
 
