@@ -14,7 +14,7 @@ Task.Run(() =>
     while (true) Thread.Sleep(1000);
 });
 
-public class Program
+public partial class Program
 {
     private DiscordSocketClient _client = null!;
     private InteractionService _interactions = null!;
@@ -504,6 +504,7 @@ public class SlashCommands : InteractionModuleBase<SocketInteractionContext>
         await RespondAsync(sb.ToString(), ephemeral: true);
     }
 }
+
 
 
 
