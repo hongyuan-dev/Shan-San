@@ -4,7 +4,7 @@ using Discord.Interactions;
 using Microsoft.Extensions.DependencyInjection;
 using System.Text.Json;
 
-class Program
+public class Program
 {
     private DiscordSocketClient _client = null!;
     private InteractionService _interactions = null!;
@@ -494,6 +494,7 @@ public class SlashCommands : InteractionModuleBase<SocketInteractionContext>
         await RespondAsync(sb.ToString(), ephemeral: true);
     }
 }
+
 
 
 
