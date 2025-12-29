@@ -5,16 +5,7 @@ using Microsoft.Extensions.DependencyInjection;
 using System.Text.Json;
 using System.Net;
 
-Task.Run(() =>
-{
-    HttpListener listener = new HttpListener();
-    listener.Prefixes.Add("http://*:8080/");
-    listener.Start();
-    Console.WriteLine("Listening on port 8080...");
-    while (true) Thread.Sleep(1000);
-});
-
-public partial class Program
+public class Program
 {
     private DiscordSocketClient _client = null!;
     private InteractionService _interactions = null!;
@@ -504,6 +495,7 @@ public class SlashCommands : InteractionModuleBase<SocketInteractionContext>
         await RespondAsync(sb.ToString(), ephemeral: true);
     }
 }
+
 
 
 
