@@ -1,12 +1,14 @@
 using Discord;
 using Discord.WebSocket;
 using Discord.Interactions;
+using Microsoft.Extensions.DependencyInjection;
 using System.Text.Json;
 
 class Program
 {
     private DiscordSocketClient _client = null!;
     private InteractionService _interactions = null!;
+    private IServiceProvider _services = null!;
 
     private static string Token =>
         Environment.GetEnvironmentVariable("DISCORD_TOKEN")
@@ -46,9 +48,17 @@ class Program
 
         _interactions = new InteractionService(_client.Rest);
 
+        _services = new ServiceCollection()
+            .AddSingleton(this) // pass Program instance to slash modules
+            .BuildServiceProvider();
+
         _client.Ready += OnReadyAsync;
         _client.MessageReceived += OnMessageAsync;
-        _client.InteractionCreated += HandleInteraction;
+        _client.InteractionCreated += async interaction =>
+        {
+            var ctx = new SocketInteractionContext(_client, interaction);
+            await _interactions.ExecuteCommandAsync(ctx, _services);
+        };
 
         LoadData();
 
@@ -59,7 +69,7 @@ class Program
 
     private async Task OnReadyAsync()
     {
-        await _interactions.AddModuleAsync<SlashCommands>(null);
+        await _interactions.AddModuleAsync<SlashCommands>(_services);
         await _interactions.RegisterCommandsGloballyAsync();
         Console.WriteLine("Bot ready.");
     }
@@ -81,7 +91,6 @@ class Program
     }
 
     // ================= MESSAGE COMMAND HANDLER =================
-
     private async Task OnMessageAsync(SocketMessage raw)
     {
         if (raw.Author.IsBot) return;
@@ -130,25 +139,7 @@ class Program
             await SetAnnounceChannel(msg);
     }
 
-    // ================= INTERACTIONS =================
-
-    private async Task HandleInteraction(SocketInteraction interaction)
-    {
-        var ctx = new SocketInteractionContext(_client, interaction);
-
-        if (interaction is SocketSlashCommand slash &&
-            !CanUseCommands((SocketGuildUser)slash.User,
-                            (SocketGuildChannel)slash.Channel))
-        {
-            await slash.RespondAsync("❌ Wrong channel.", ephemeral: true);
-            return;
-        }
-
-        await _interactions.ExecuteCommandAsync(ctx, null);
-    }
-
     // ================= CORE LOGIC =================
-
     public async Task RecalculateRolesAsync(SocketGuildUser user)
     {
         int pts = _points.GetValueOrDefault(user.Id);
@@ -196,7 +187,6 @@ class Program
     }
 
     // ================= COMMAND IMPLEMENTATIONS =================
-
     private async Task GivePoints(SocketUserMessage msg, SocketGuild guild)
     {
         var user = msg.Author as SocketGuildUser;
@@ -316,7 +306,6 @@ class Program
     }
 
     // ================= STORAGE =================
-
     private void LoadData()
     {
         if (File.Exists(PointsFile))
@@ -339,74 +328,78 @@ class Program
 }
 
 // ================= SLASH COMMANDS =================
-
 public class SlashCommands : InteractionModuleBase<SocketInteractionContext>
 {
-    private Program Bot => (Program)Context.Client;
+    private readonly Program _bot;
+
+    public SlashCommands(Program bot)
+    {
+        _bot = bot;
+    }
 
     [SlashCommand("points", "Show points")]
     public async Task Points(SocketGuildUser? user = null)
     {
         user ??= (SocketGuildUser)Context.User;
-        await RespondAsync($"{user.Username} has {Bot._points.GetValueOrDefault(user.Id)} points.", ephemeral: true);
+        await RespondAsync($"{user.Username} has {_bot._points.GetValueOrDefault(user.Id)} points.", ephemeral: true);
     }
 
     [SlashCommand("givepoints", "Give points")]
     public async Task GivePoints(SocketGuildUser user, int amount = 1)
     {
-        if (!Bot.IsAdminOrPointGiver((SocketGuildUser)Context.User))
+        if (!_bot.IsAdminOrPointGiver((SocketGuildUser)Context.User))
         {
             await RespondAsync("❌ No permission.", ephemeral: true);
             return;
         }
 
-        Bot._points[user.Id] = Bot._points.GetValueOrDefault(user.Id) + amount;
-        Bot.SavePoints();
-        await Bot.RecalculateRolesAsync(user);
+        _bot._points[user.Id] = _bot._points.GetValueOrDefault(user.Id) + amount;
+        _bot.SavePoints();
+        await _bot.RecalculateRolesAsync(user);
         await RespondAsync("✅ Points given.", ephemeral: true);
     }
 
     [SlashCommand("restorepoints", "Reset points")]
     public async Task Restore(SocketGuildUser user)
     {
-        if (!Bot.IsAdminOrPointGiver((SocketGuildUser)Context.User))
+        if (!_bot.IsAdminOrPointGiver((SocketGuildUser)Context.User))
         {
             await RespondAsync("❌ No permission.", ephemeral: true);
             return;
         }
 
-        Bot._points[user.Id] = 0;
-        Bot.SavePoints();
-        await Bot.RecalculateRolesAsync(user);
+        _bot._points[user.Id] = 0;
+        _bot.SavePoints();
+        await _bot.RecalculateRolesAsync(user);
         await RespondAsync("♻ Points reset.", ephemeral: true);
     }
 
     [SlashCommand("upgrade", "Create upgrade path")]
     public async Task Upgrade(SocketRole oldRole, SocketRole newRole, int points)
     {
-        if (!Bot.IsAdminOrPointGiver((SocketGuildUser)Context.User))
+        if (!_bot.IsAdminOrPointGiver((SocketGuildUser)Context.User))
         {
             await RespondAsync("❌ No permission.", ephemeral: true);
             return;
         }
 
-        Bot._upgradePaths.RemoveAll(u => u.OldRoleId == oldRole.Id && u.NewRoleId == newRole.Id);
-        Bot._upgradePaths.Add(new Program.UpgradePath { OldRoleId = oldRole.Id, NewRoleId = newRole.Id, RequiredPoints = points });
-        Bot.SaveUpgrades();
+        _bot._upgradePaths.RemoveAll(u => u.OldRoleId == oldRole.Id && u.NewRoleId == newRole.Id);
+        _bot._upgradePaths.Add(new Program.UpgradePath { OldRoleId = oldRole.Id, NewRoleId = newRole.Id, RequiredPoints = points });
+        _bot.SaveUpgrades();
         await RespondAsync("✅ Upgrade path set.", ephemeral: true);
     }
 
     [SlashCommand("removeupgrade", "Remove upgrade path")]
     public async Task RemoveUpgrade(SocketRole oldRole, SocketRole newRole)
     {
-        if (!Bot.IsAdminOrPointGiver((SocketGuildUser)Context.User))
+        if (!_bot.IsAdminOrPointGiver((SocketGuildUser)Context.User))
         {
             await RespondAsync("❌ No permission.", ephemeral: true);
             return;
         }
 
-        Bot._upgradePaths.RemoveAll(u => u.OldRoleId == oldRole.Id && u.NewRoleId == newRole.Id);
-        Bot.SaveUpgrades();
+        _bot._upgradePaths.RemoveAll(u => u.OldRoleId == oldRole.Id && u.NewRoleId == newRole.Id);
+        _bot.SaveUpgrades();
         await RespondAsync("✅ Upgrade removed.", ephemeral: true);
     }
 
@@ -414,14 +407,14 @@ public class SlashCommands : InteractionModuleBase<SocketInteractionContext>
     public async Task SetCommand()
     {
         var u = (SocketGuildUser)Context.User;
-        if (!Bot.IsAdmin(u))
+        if (!_bot.IsAdmin(u))
         {
             await RespondAsync("❌ Admins only.", ephemeral: true);
             return;
         }
 
-        Bot._commandChannels[u.Guild.Id] = Context.Channel.Id;
-        Bot.SaveCommands();
+        _bot._commandChannels[u.Guild.Id] = Context.Channel.Id;
+        _bot.SaveCommands();
         await RespondAsync("🛠 Command channel set.", ephemeral: true);
     }
 
@@ -429,14 +422,14 @@ public class SlashCommands : InteractionModuleBase<SocketInteractionContext>
     public async Task SetAnnounce()
     {
         var u = (SocketGuildUser)Context.User;
-        if (!Bot.IsAdmin(u))
+        if (!_bot.IsAdmin(u))
         {
             await RespondAsync("❌ Admins only.", ephemeral: true);
             return;
         }
 
-        Bot._announceChannels[u.Guild.Id] = Context.Channel.Id;
-        Bot.SaveAnnounce();
+        _bot._announceChannels[u.Guild.Id] = Context.Channel.Id;
+        _bot.SaveAnnounce();
         await RespondAsync("📢 Announcement channel set.", ephemeral: true);
     }
 
@@ -444,14 +437,14 @@ public class SlashCommands : InteractionModuleBase<SocketInteractionContext>
     public async Task AddPointGiver(SocketRole role)
     {
         var u = (SocketGuildUser)Context.User;
-        if (!Bot.IsAdmin(u))
+        if (!_bot.IsAdmin(u))
         {
             await RespondAsync("❌ Admins only.", ephemeral: true);
             return;
         }
 
-        Bot._pointGiverRoles.Add(role.Id);
-        Bot.SavePointGivers();
+        _bot._pointGiverRoles.Add(role.Id);
+        _bot.SavePointGivers();
         await RespondAsync("✅ Point giver role added.", ephemeral: true);
     }
 
@@ -459,7 +452,7 @@ public class SlashCommands : InteractionModuleBase<SocketInteractionContext>
     public async Task Leaderboard(SocketRole? role = null)
     {
         var u = (SocketGuildUser)Context.User;
-        if (!Bot.IsAdminOrPointGiver(u))
+        if (!_bot.IsAdminOrPointGiver(u))
         {
             await RespondAsync("❌ No permission.", ephemeral: true);
             return;
@@ -467,7 +460,7 @@ public class SlashCommands : InteractionModuleBase<SocketInteractionContext>
 
         var users = Context.Guild.Users
             .Where(x => role == null || x.Roles.Any(r => r.Id == role.Id))
-            .Select(u => new { u.Username, P = Bot._points.GetValueOrDefault(u.Id) })
+            .Select(u => new { u.Username, P = _bot._points.GetValueOrDefault(u.Id) })
             .OrderByDescending(x => x.P)
             .Take(10);
 
@@ -482,7 +475,7 @@ public class SlashCommands : InteractionModuleBase<SocketInteractionContext>
         sb.AppendLine("**Discord Points Bot Commands**");
         sb.AppendLine("`/points [user]` - Show your or another user's points.");
 
-        if (Bot.IsAdminOrPointGiver(u))
+        if (_bot.IsAdminOrPointGiver(u))
         {
             sb.AppendLine("`/givepoints <user> [amount]` - Give points.");
             sb.AppendLine("`/restorepoints <user>` - Reset points.");
@@ -491,7 +484,7 @@ public class SlashCommands : InteractionModuleBase<SocketInteractionContext>
             sb.AppendLine("`/showpoints [role]` - Leaderboard.");
         }
 
-        if (Bot.IsAdmin(u))
+        if (_bot.IsAdmin(u))
         {
             sb.AppendLine("`/addpointgiver <role>` - Add a point giver role.");
             sb.AppendLine("`/setcommandchannel` - Set command channel.");
@@ -501,6 +494,7 @@ public class SlashCommands : InteractionModuleBase<SocketInteractionContext>
         await RespondAsync(sb.ToString(), ephemeral: true);
     }
 }
+
 
 
 
